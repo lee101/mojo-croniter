@@ -235,6 +235,7 @@ def _parse(
     second_at_beginning: bool = False,
     from_timestamp: float | None = None,
     strict: bool = False,
+    strict_year: int | list[int] | None = None,
 ) -> tuple[list[list[int | str]], dict[int, set[int | str]], list[str], int]:
     fields = _normalize_expression(expression, second_at_beginning)
     from_dt = (
@@ -257,14 +258,22 @@ def _parse(
         expanded[DAY_FIELD] = ["*"]
     if expanded[DOW_FIELD] == full_dow and dom_wildcard_syntax and not nth:
         expanded[DOW_FIELD] = ["*"]
-    if nth and expanded[DAY_FIELD] != ["*"]:
-        # Matches croniter.croniter._expand combining-# restriction: upstream
-        # accepts restricted day-of-month with nth-weekday (it has no such
-        # combined restriction); the port's kernel cannot represent the
-        # combination, so it raises rather than mis-firing.
-        raise CroniterUnsupportedSyntaxError(
-            "combining #/last-weekday with a restricted day-of-month is not supported"
-        )
+    if nth:
+        # Matches croniter.croniter._expand: mixing a literal day-of-week with
+        # an nth-weekday (``1#2``) or last-weekday (``l7``) is rejected, unless
+        # the day-of-week field expands to the full cycle (LEN_MEANS_ALL).
+        dow_values = expanded[DOW_FIELD]
+        if dow_values != ["*"] and len(dow_values) != 7:
+            literal_dow = {v for v in dow_values if isinstance(v, int)} - set(nth)
+            if literal_dow:
+                raise CroniterUnsupportedSyntaxError(
+                    "day-of-week field does not support mixing literal values and nth "
+                    "day of week syntax"
+                )
+        if expanded[DAY_FIELD] != ["*"]:
+            raise CroniterUnsupportedSyntaxError(
+                "combining #/last-weekday with a restricted day-of-month is not supported"
+            )
     if strict:
         # Matches croniter.croniter._expand strict branch: reject day-of-month
         # values that can never occur in the restricted months (e.g. 31 in Feb).
@@ -276,7 +285,21 @@ def _parse(
             if int_days and int_months:
                 days_in_month = {1: 31, 2: 28, 3: 31, 4: 30, 5: 31, 6: 30, 7: 31, 8: 31, 9: 30, 10: 31, 11: 30, 12: 31}
                 if 2 in int_months:
-                    days_in_month[2] = 29  # assume leap possible, as upstream does
+                    # strict_year only affects leap detection, as upstream does.
+                    has_leap_year = True
+                    if strict_year is not None:
+                        years_list = (
+                            [strict_year] if isinstance(strict_year, int) else list(strict_year)
+                        )
+                        has_leap_year = any(calendar.isleap(y) for y in years_list)
+                    elif len(expanded) > YEAR_FIELD:
+                        years = expanded[YEAR_FIELD]
+                        if years != ["*"]:
+                            int_years = [y for y in years if isinstance(y, int)]  # type: ignore[misc]
+                            if int_years:
+                                has_leap_year = any(calendar.isleap(y) for y in int_years)
+                    if has_leap_year:
+                        days_in_month[2] = 29
                 max_possible = max(days_in_month[m] for m in int_months)
                 if min(int_days) > max_possible:
                     raise CroniterBadCronError(
@@ -432,12 +455,8 @@ class croniter:
         if hash_id is not None and not isinstance(hash_id, (bytes, str)):
             raise TypeError("hash_id must be bytes or UTF-8 string")
         expanded, nth, _, _ = _parse(
-            expr_format, second_at_beginning, from_timestamp, strict
+            expr_format, second_at_beginning, from_timestamp, strict, strict_year=strict_year
         )
-        if strict_year is not None and len(expanded) == 7:
-            years = [strict_year] if isinstance(strict_year, int) else strict_year
-            if expanded[YEAR_FIELD] == ["*"] or not set(years).issubset(expanded[YEAR_FIELD]):
-                raise CroniterBadCronError("year does not satisfy strict_year")
         return expanded, nth
 
     @classmethod

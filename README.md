@@ -93,11 +93,11 @@ the same start datetime.
 
 | case | occurrences | mojo-croniter | croniter 6.2.4 | speedup |
 |---|---:|---:|---:|---:|
-| Every minute, scalar | 50,000 | 1067.34 ms | 1313.53 ms | 1.23x |
-| Every 10 seconds, scalar | 50,000 | 1089.80 ms | 1107.57 ms | 1.02x |
-| Business hours, scalar | 50,000 | 967.49 ms | 2463.38 ms | 2.55x |
-| Every minute, bulk | 200,000 | 84.71 ms | 7417.42 ms | 87.56x |
-| Business hours, bulk | 100,000 | 46.44 ms | 5923.15 ms | 127.54x |
+| Every minute, scalar | 50,000 | 453.47 ms | 1329.55 ms | 2.93x |
+| Every 10 seconds, scalar | 50,000 | 422.05 ms | 1019.93 ms | 2.42x |
+| Business hours, scalar | 50,000 | 483.02 ms | 2362.85 ms | 4.89x |
+| Every minute, bulk | 200,000 | 57.75 ms | 5521.95 ms | 95.62x |
+| Business hours, bulk | 100,000 | 33.38 ms | 5099.75 ms | 152.76x |
 
 Scalar rows call the same `get_next()` API as upstream for every occurrence.
 Bulk rows use `get_next_n()` on the Mojo side and repeated `get_next()` calls

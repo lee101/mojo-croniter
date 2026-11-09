@@ -1,12 +1,13 @@
-"""Parity hardening: tolerance-based comparisons + degenerate inputs.
+"""Parity hardening: exact comparisons + degenerate inputs.
 
-Every numeric comparison against upstream uses ``pytest.approx`` with the
-explicit tolerances below. Every error comparison is by base-class name,
-because the two packages define independent exception hierarchies with the
-same class names (upstream ``croniter.croniter.CroniterBadCronError`` vs
-``mojo_croniter.core.CroniterBadCronError``). Where the port intentionally
-differs and the README documents it, the test pins the documented contract
-and records the upstream behaviour alongside.
+Numeric comparisons against upstream are exact equality (verified: all
+float-timestamp sequences below agree bit-for-bit). The two packages define
+independent exception hierarchies with the same class names (upstream
+``croniter.croniter.CroniterBadCronError`` vs
+``mojo_croniter.core.CroniterBadCronError``), so error checks assert the
+concrete exception type on each side. Where the port intentionally differs
+and the README documents it, the test pins the documented contract and
+records the upstream behaviour alongside.
 """
 
 from __future__ import annotations
@@ -35,35 +36,19 @@ from mojo_croniter import (
     datetime_to_timestamp,
 )
 
-# pytest.approx tolerances, stated once and used everywhere below.
-ABS_TOL = 1e-6
-REL_TOL = 1e-9
-
-
-def approx_ts(value):
-    return pytest.approx(value, abs=ABS_TOL, rel=REL_TOL)
-
-
 def assert_float_sequence_matches_upstream(ours, theirs):
     ours, theirs = list(ours), list(theirs)
     assert len(ours) == len(theirs)
-    assert ours == approx_ts(theirs)
+    assert ours == theirs
 
 
-def assert_raises_same_base(ours_call, upstream_call):
-    """Both must raise; the mojo exception's MRO must share a base-class name
-    with upstream's (CroniterError / ValueError family or the same stdlib
-    leaf TypeError / AttributeError / OverflowError)."""
-    with pytest.raises(Exception) as upstream_exc:
+def assert_raises_same_base(ours_call, upstream_call, exc_type):
+    """Both must raise the expected stdlib leaf type (ValueError for NaN,
+    OverflowError for +-inf)."""
+    with pytest.raises(exc_type):
         upstream_call()
-    upstream_names = {c.__name__ for c in type(upstream_exc.value).__mro__}
-    with pytest.raises(Exception) as ours_exc:
+    with pytest.raises(exc_type):
         ours_call()
-    ours_names = {c.__name__ for c in type(ours_exc.value).__mro__}
-    assert (upstream_names & ours_names) - {"Exception", "BaseException", "object"}, (
-        f"different error bases: upstream {type(upstream_exc.value).__name__} "
-        f"vs ours {type(ours_exc.value).__name__}"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -107,19 +92,22 @@ def test_expand_strict_ambiguous_day_fields_recorded():
     )
 
 
-def test_expand_strict_year_semantics_recorded():
-    # Upstream ignores strict_year unless strict=True (only used for leap
-    # detection in _expand); the port validates membership whenever a year
-    # field is present. Pin the port contract and the upstream acceptance.
-    assert upstream_croniter.expand("0 0 * * * * 2024", strict_year=2023) == (
-        [[0], [0], ["*"], ["*"], ["*"], ["*"], [2024]],
-        {},
+def test_expand_strict_year_matches_upstream():
+    # Upstream ignores strict_year for membership (it only affects leap
+    # detection under strict=True). Assert parity.
+    assert croniter.expand("0 0 * * * * 2024", strict_year=2023) == (
+        upstream_croniter.expand("0 0 * * * * 2024", strict_year=2023)
     )
-    with pytest.raises(CroniterBadCronError):
-        croniter.expand("0 0 * * * * 2024", strict_year=2023)
     assert croniter.expand("0 0 * * * * 2024", strict_year=2024, strict=True) == (
-        [[0], [0], ["*"], ["*"], ["*"], ["*"], [2024]],
-        {},
+        upstream_croniter.expand("0 0 * * * * 2024", strict_year=2024, strict=True)
+    )
+    # Under strict=True, strict_year decides Feb leap detection on both sides.
+    with pytest.raises(CroniterBadCronError):
+        croniter.expand("0 0 29 2 *", strict=True, strict_year=2023)
+    with pytest.raises(UpstreamBadCronError):
+        upstream_croniter.expand("0 0 29 2 *", strict=True, strict_year=2023)
+    assert croniter.expand("0 0 29 2 *", strict=True, strict_year=2024) == (
+        upstream_croniter.expand("0 0 29 2 *", strict=True, strict_year=2024)
     )
 
 
@@ -139,13 +127,14 @@ def test_expand_hash_id_types_recorded():
         croniter.is_valid("* * * * *", hash_id=123)
 
 
-def test_expand_nth_mixing_rules_recorded():
+def test_expand_nth_mixing_matches_upstream():
     assert croniter.expand("0 0 * * 1#2,1") == upstream_croniter.expand("0 0 * * 1#2,1")
-    # Upstream forbids mixing a literal dow with an nth dow (e.g. 1#2,2);
-    # the port accepts and applies both rules via the kernel mask.
+    # Both reject mixing a literal dow with an nth dow (e.g. 1#2,2).
+    with pytest.raises(CroniterUnsupportedSyntaxError):
+        croniter.expand("0 0 * * 1#2,2")
     with pytest.raises(UpstreamUnsupportedSyntaxError):
         upstream_croniter.expand("0 0 * * 1#2,2")
-    assert croniter.expand("0 0 * * 1#2,2") == ([[0], [0], ["*"], ["*"], [1, 2]], {1: {2}})
+    assert croniter.is_valid("0 0 * * 1#2,2") == upstream_croniter.is_valid("0 0 * * 1#2,2") is False
 
 
 def test_expand_degenerate_inputs():
@@ -190,7 +179,7 @@ def test_expand_non_string_inputs():
         ("0 0 * * 2#3", datetime(2024, 1, 1)),
     ],
 )
-def test_float_get_next_prev_matches_upstream_with_tolerance(expression, start):
+def test_float_get_next_prev_matches_upstream_exact(expression, start):
     ours = croniter(expression, start)
     theirs = upstream_croniter(expression, start)
     assert_float_sequence_matches_upstream(
@@ -205,44 +194,34 @@ def test_float_get_next_prev_matches_upstream_with_tolerance(expression, start):
 
 def test_get_current_and_set_current_match_upstream():
     start = datetime(2024, 1, 1, 12, 34, 56, 123456)
-    assert croniter("* * * * *", start).get_current() == approx_ts(
-        upstream_croniter("* * * * *", start).get_current()
-    )
+    assert croniter("* * * * *", start).get_current() == upstream_croniter(
+        "* * * * *", start
+    ).get_current()
     assert croniter("* * * * *", start).get_current(datetime) == upstream_croniter(
         "* * * * *", start
     ).get_current(datetime)
     ours = croniter("* * * * *", start)
     theirs = upstream_croniter("* * * * *", start)
-    assert ours.set_current(1704111000.0) == approx_ts(theirs.set_current(1704111000.0))
-    assert ours.set_current(None, force=False) == approx_ts(
-        theirs.set_current(None, force=False)
-    )
+    assert ours.set_current(1704111000.0) == theirs.set_current(1704111000.0)
+    assert ours.set_current(None, force=False) == theirs.set_current(None, force=False)
     # set_current with a datetime re-binds tzinfo on both sides
     aware = datetime(2024, 3, 9, tzinfo=ZoneInfo("America/New_York"))
-    assert croniter("* * * * *", start).set_current(aware) == approx_ts(
-        upstream_croniter("* * * * *", start).set_current(aware)
-    )
+    assert croniter("* * * * *", start).set_current(aware) == upstream_croniter("* * * * *", start).set_current(aware)
 
 
 def test_get_next_start_time_override_matches_upstream():
     ours = croniter("*/5 * * * *", datetime(2024, 1, 1))
     theirs = upstream_croniter("*/5 * * * *", datetime(2024, 1, 1))
-    assert ours.get_next(start_time=1704067320.0) == approx_ts(
-        theirs.get_next(start_time=1704067320.0)
-    )
+    assert ours.get_next(start_time=1704067320.0) == theirs.get_next(start_time=1704067320.0)
     ours = croniter("*/5 * * * *", datetime(2024, 1, 1))
     theirs = upstream_croniter("*/5 * * * *", datetime(2024, 1, 1))
-    assert ours.get_prev(start_time=1704067320.0) == approx_ts(
-        theirs.get_prev(start_time=1704067320.0)
-    )
+    assert ours.get_prev(start_time=1704067320.0) == theirs.get_prev(start_time=1704067320.0)
     ours = croniter("*/5 * * * *", datetime(2024, 1, 1))
     theirs = upstream_croniter("*/5 * * * *", datetime(2024, 1, 1))
-    assert ours.get_next(start_time=datetime(2024, 1, 1, 0, 2)) == approx_ts(
-        theirs.get_next(start_time=datetime(2024, 1, 1, 0, 2))
-    )
+    assert ours.get_next(start_time=datetime(2024, 1, 1, 0, 2)) == theirs.get_next(start_time=datetime(2024, 1, 1, 0, 2))
 
 
-def test_datetime_to_timestamp_matches_upstream_with_tolerance():
+def test_datetime_to_timestamp_matches_upstream_exact():
     cases = [
         datetime(1970, 1, 1),
         datetime(1970, 1, 1, 0, 0, 0, 1),
@@ -254,9 +233,7 @@ def test_datetime_to_timestamp_matches_upstream_with_tolerance():
         datetime(2024, 6, 1, 12, 0, tzinfo=ZoneInfo("America/New_York")),
     ]
     for value in cases:
-        assert datetime_to_timestamp(value) == approx_ts(
-            upstream_croniter.datetime_to_timestamp(value)
-        )
+        assert datetime_to_timestamp(value) == upstream_croniter.datetime_to_timestamp(value)
 
 
 def test_timestamp_to_datetime_and_roundtrip():
@@ -271,9 +248,7 @@ def test_timestamp_to_datetime_and_roundtrip():
         datetime(2024, 1, 1, 12, 0, 0, 123456),
         datetime(2024, 1, 1, tzinfo=timezone.utc),
     ]:
-        assert datetime_to_timestamp(value) == approx_ts(
-            upstream_croniter.datetime_to_timestamp(value)
-        )
+        assert datetime_to_timestamp(value) == upstream_croniter.datetime_to_timestamp(value)
 
 
 def test_get_next_ret_type_validation_matches_upstream():
@@ -288,7 +263,7 @@ def test_get_next_ret_type_validation_matches_upstream():
 # Generators, iterator protocol, bulk API
 # ---------------------------------------------------------------------------
 
-def test_all_next_prev_and_iterator_with_tolerance():
+def test_all_next_prev_and_iterator_exact():
     start = datetime(2024, 1, 1, 12, 0)
     ours = croniter("7,37 * * * *", start)
     theirs = upstream_croniter("7,37 * * * *", start)
@@ -303,16 +278,16 @@ def test_all_next_prev_and_iterator_with_tolerance():
     # __next__ advances like get_next
     ours = croniter("*/5 * * * *", start)
     theirs = upstream_croniter("*/5 * * * *", start)
-    assert next(ours) == approx_ts(next(theirs))
+    assert next(ours) == next(theirs)
     # is_prev iterator direction
     ours = croniter("*/5 * * * *", start, is_prev=True)
     theirs = upstream_croniter("*/5 * * * *", start, is_prev=True)
     ours_first = next(ours.iter()())
     theirs_first = next(theirs.iter()())
-    assert ours_first == approx_ts(theirs_first)
+    assert ours_first == theirs_first
 
 
-def test_bulk_get_next_n_prev_n_match_scalar_upstream_with_tolerance():
+def test_bulk_get_next_n_prev_n_match_scalar_upstream_exact():
     start = datetime(2024, 7, 12, 11, 22, 33)
     ours = croniter("*/7 6-20 * * mon-fri", start)
     theirs = upstream_croniter("*/7 6-20 * * mon-fri", start)
@@ -327,7 +302,7 @@ def test_bulk_get_next_n_prev_n_match_scalar_upstream_with_tolerance():
     # current time advances to the last bulk element
     ours = croniter("*/5 * * * *", start)
     bulk = ours.get_next_n(3)
-    assert ours.get_current() == approx_ts(bulk[-1])
+    assert ours.get_current() == bulk[-1]
 
 
 def test_bulk_zero_and_degenerate_counts():
@@ -337,7 +312,7 @@ def test_bulk_zero_and_degenerate_counts():
     assert iterator.get_prev_n(0) == []
     assert iterator.get_current() == before
     expected_first = croniter("* * * * *", datetime(2024, 1, 1, 12, 0)).get_next()
-    assert iterator.get_next_n(1)[0] == approx_ts(expected_first)
+    assert iterator.get_next_n(1)[0] == expected_first
     with pytest.raises(ValueError):
         iterator.get_next_n(-1)
     with pytest.raises(ValueError):
@@ -432,10 +407,10 @@ def test_croniter_range_single_element_and_empty():
     )
 
 
-def test_croniter_range_float_and_day_or_with_tolerance():
+def test_croniter_range_float_and_day_or_exact():
     start = datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp()
-    assert list(croniter_range(start, start + 7200, "*/17 * * * *")) == approx_ts(
-        list(upstream_range(start, start + 7200, "*/17 * * * *"))
+    assert list(croniter_range(start, start + 7200, "*/17 * * * *")) == list(
+        upstream_range(start, start + 7200, "*/17 * * * *")
     )
     assert list(
         croniter_range(datetime(2024, 1, 1), datetime(2024, 3, 1), "0 0 1 * 1", day_or=False)
@@ -463,11 +438,15 @@ def test_croniter_range_mismatched_shapes_raise_same_error():
 # Degenerate start times: NaN / inf / out-of-window bounds
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("start", [float("nan"), float("inf"), float("-inf")])
-def test_degenerate_start_times_raise_same_class(start):
+@pytest.mark.parametrize(
+    ("start", "exc_type"),
+    [(float("nan"), ValueError), (float("inf"), OverflowError), (float("-inf"), OverflowError)],
+)
+def test_degenerate_start_times_raise_same_class(start, exc_type):
     assert_raises_same_base(
         lambda: croniter("* * * * *", start).get_next(),
         lambda: upstream_croniter("* * * * *", start).get_next(),
+        exc_type,
     )
 
 
@@ -476,10 +455,12 @@ def test_start_time_override_nan_inf_matches_upstream():
     assert_raises_same_base(
         lambda: croniter("* * * * *", start).get_next(start_time=float("nan")),
         lambda: upstream_croniter("* * * * *", start).get_next(start_time=float("nan")),
+        ValueError,
     )
     assert_raises_same_base(
         lambda: croniter("* * * * *", start).get_next(start_time=float("inf")),
         lambda: upstream_croniter("* * * * *", start).get_next(start_time=float("inf")),
+        OverflowError,
     )
 
 
@@ -533,29 +514,32 @@ def test_special_day_rules_iteration_matches_upstream(expression):
     assert [ours.get_prev() for _ in range(5)] == [theirs.get_prev() for _ in range(5)]
 
 
-def test_nearest_weekday_clamp_deviation_is_documented():
-    # Upstream clamps W to the month length (_get_nearest_weekday does
-    # min(day, last_day)); the port skips such months. Pin per-month behaviour.
-    cases = [
-        ("0 0 31w * *", datetime(2024, 2, 1, 0, 0, 1), datetime(2024, 3, 29), datetime(2024, 2, 29)),
-        ("0 0 31w * *", datetime(2024, 4, 1, 0, 0, 1), datetime(2024, 5, 31), datetime(2024, 4, 30)),
-        ("0 0 29w * *", datetime(2024, 2, 1, 0, 0, 1), datetime(2024, 2, 29), datetime(2024, 2, 29)),
-    ]
-    for expression, start, expected_ours, expected_theirs in cases:
+def test_nearest_weekday_clamp_matches_upstream():
+    # Both clamp W to the month length (upstream _get_nearest_weekday does
+    # min(day, last_day)). Assert exact parity.
+    for expression, start in [
+        ("0 0 31w * *", datetime(2024, 2, 1, 0, 0, 1)),
+        ("0 0 31w * *", datetime(2024, 4, 1, 0, 0, 1)),
+        ("0 0 29w * *", datetime(2024, 2, 1, 0, 0, 1)),
+        ("0 0 30w * *", datetime(2024, 2, 1, 0, 0, 1)),
+        ("0 0 31w * *", datetime(2023, 2, 1, 0, 0, 1)),
+    ]:
         ours = croniter(expression, start, ret_type=datetime).get_next()
         theirs = upstream_croniter(expression, start, ret_type=datetime).get_next()
-        assert ours == expected_ours
-        assert theirs == expected_theirs
+        assert ours == theirs
+        ours = croniter(expression, start, ret_type=datetime).get_prev()
+        theirs = upstream_croniter(expression, start, ret_type=datetime).get_prev()
+        assert ours == theirs
 
 
-def test_dst_spring_gap_with_tolerance():
+def test_dst_spring_gap_exact():
     zone = ZoneInfo("America/New_York")
     start = datetime(2024, 3, 9, tzinfo=zone)
     ours = croniter("30 2 * * *", start, ret_type=datetime)
     theirs = upstream_croniter("30 2 * * *", start, ret_type=datetime)
-    assert [v.timestamp() for v in ours.get_next_n(5, datetime)] == approx_ts(
-        [v.timestamp() for v in [theirs.get_next() for _ in range(5)]]
-    )
+    assert [v.timestamp() for v in ours.get_next_n(5, datetime)] == [
+        v.timestamp() for v in [theirs.get_next() for _ in range(5)]
+    ]
 
 
 def test_dst_fall_fold_ordering_is_documented():
@@ -596,8 +580,8 @@ def test_instance_attributes_match_upstream():
     assert ours.expanded == theirs.expanded
     assert ours.nth_weekday_of_month == theirs.nth_weekday_of_month
     assert ours.expressions == theirs.expressions
-    assert ours.start_time == approx_ts(theirs.start_time)
-    assert ours.cur == approx_ts(theirs.cur)
+    assert ours.start_time == theirs.start_time
+    assert ours.cur == theirs.cur
     assert ours.tzinfo == theirs.tzinfo
 
 

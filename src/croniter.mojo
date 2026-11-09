@@ -80,7 +80,9 @@ def day_allowed(
         dom_ok = True
     var nearest = Int(special[3])
     if nearest > 0:
-        var target = nearest
+        # Matches upstream Croniter._get_nearest_weekday: clamp to month length.
+        var last_day = month_days(year, month)
+        var target = nearest if nearest < last_day else last_day
         var target_dow = (days_from_civil(year, month, target) + 4) % 7
         if target_dow == 6:
             target = target - 1 if target > 1 else target + 2
