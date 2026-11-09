@@ -134,7 +134,7 @@ def test_float_return_current_and_no_update_match_upstream():
     ours = croniter("*/5 * * * *", start)
     theirs = upstream_croniter("*/5 * * * *", start)
     assert ours.get_next(update_current=False) == theirs.get_next(update_current=False)
-    assert ours.get_current() == pytest.approx(theirs.get_current())
+    assert ours.get_current() == theirs.get_current()
     assert ours.get_next() == theirs.get_next()
     assert ours.get_prev() == theirs.get_prev()
 
@@ -214,8 +214,8 @@ def test_croniter_range_datetime_matches_upstream():
 def test_croniter_range_float_matches_upstream():
     start = datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp()
     stop = start + 7200
-    assert list(croniter_range(start, stop, "*/17 * * * *")) == pytest.approx(
-        list(upstream_range(start, stop, "*/17 * * * *"))
+    assert list(croniter_range(start, stop, "*/17 * * * *")) == list(
+        upstream_range(start, stop, "*/17 * * * *")
     )
 
 
