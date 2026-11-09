@@ -258,11 +258,30 @@ def _parse(
     if expanded[DOW_FIELD] == full_dow and dom_wildcard_syntax and not nth:
         expanded[DOW_FIELD] = ["*"]
     if nth and expanded[DAY_FIELD] != ["*"]:
+        # Matches croniter.croniter._expand combining-# restriction: upstream
+        # accepts restricted day-of-month with nth-weekday (it has no such
+        # combined restriction); the port's kernel cannot represent the
+        # combination, so it raises rather than mis-firing.
         raise CroniterUnsupportedSyntaxError(
             "combining #/last-weekday with a restricted day-of-month is not supported"
         )
-    if strict and expanded[DAY_FIELD] != ["*"] and expanded[DOW_FIELD] != ["*"]:
-        raise CroniterBadCronError("strict mode forbids restricting both day fields")
+    if strict:
+        # Matches croniter.croniter._expand strict branch: reject day-of-month
+        # values that can never occur in the restricted months (e.g. 31 in Feb).
+        days = expanded[DAY_FIELD]
+        months = expanded[MONTH_FIELD]
+        if days not in (["*"], ["l"]) and months != ["*"]:
+            int_days = [d for d in days if isinstance(d, int)]  # type: ignore[misc]
+            int_months = [m for m in months if isinstance(m, int)]  # type: ignore[misc]
+            if int_days and int_months:
+                days_in_month = {1: 31, 2: 28, 3: 31, 4: 30, 5: 31, 6: 30, 7: 31, 8: 31, 9: 30, 10: 31, 11: 30, 12: 31}
+                if 2 in int_months:
+                    days_in_month[2] = 29  # assume leap possible, as upstream does
+                max_possible = max(days_in_month[m] for m in int_months)
+                if min(int_days) > max_possible:
+                    raise CroniterBadCronError(
+                        "day can never occur in the restricted month(s)"
+                    )
     return expanded, nth, fields, special["nearest"]
 
 
